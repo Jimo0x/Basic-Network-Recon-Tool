@@ -1,15 +1,4 @@
 #!/usr/bin/env python3
-"""
-Basic Network Recon Tool - v2.0
-Projet 1 - Cybersecurity Portfolio
-Fonctionnalités :
-  - Ping Sweep + ARP Scan
-  - Port Scanner + Service Detection
-  - OS Fingerprinting
-  - DNS Resolution + Subdomain Enumeration
-  - Banner Grabbing
-  - Rapport final
-"""
 
 import socket
 import subprocess
@@ -316,7 +305,7 @@ def menu():
 {C.CYAN}{C.GRAS}
   ╔══════════════════════════════════════╗
   ║    Basic Network Recon Tool v2.0     ║
-  ║    Projet 1 — Cyber Portfolio        ║
+  ║                                      ║
   ╚══════════════════════════════════════╝
 {C.RESET}""")
     print("  1. Ping Sweep")
