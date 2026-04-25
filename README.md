@@ -58,7 +58,7 @@ python3 recon.py
 ```
   ╔══════════════════════════════════════╗
   ║    Basic Network Recon Tool v2.0     ║
-  ║    Projet 1 — Cyber Portfolio        ║
+  ║                                      ║
   ╚══════════════════════════════════════╝
 
   1. Ping Sweep
@@ -155,7 +155,7 @@ Teste une wordlist de 35+ sous-domaines courants (`www`, `mail`, `api`, `admin`,
 ## 👤 Auteur
 
 **Jimo0x**  
-[![GitHub](https://img.shields.io/badge/GitHub-000?style=flat&logo=github)](https://github.com/TON_USERNAME)
+[![GitHub](https://img.shields.io/badge/GitHub-000?style=flat&logo=github)](https://github.com/Jimo0x)
 
 ---
 
