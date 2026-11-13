@@ -5,6 +5,10 @@ import subprocess
 import sys
 import struct
 import os
+import argparse
+import ipaddress
+import platform
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 # ─────────────────────────────────────────
@@ -28,19 +32,60 @@ def warn(msg):    print(f"{C.JAUNE}[!]{C.RESET} {msg}")
 # ─────────────────────────────────────────
 # 1. PING SWEEP
 # ─────────────────────────────────────────
+THREADS = 100
+
+
+def valider_subnet(texte):
+    """'192.168.1', '192.168.1.0' ou '192.168.1.0/24' -> '192.168.1'. Lève ValueError sinon."""
+    texte = texte.strip().split("/")[0]
+    octets = texte.split(".")
+    if len(octets) == 4:
+        octets = octets[:3]
+    if len(octets) != 3:
+        raise ValueError(f"sous-réseau invalide : {texte!r} (attendu : 192.168.1)")
+    base = ".".join(octets)
+    ipaddress.IPv4Address(base + ".0")  # lève ValueError si un octet est hors 0-255
+    return base
+
+
+def parser_ports(texte):
+    """'22,80,8000-8010' -> [22, 80, 8000, ..., 8010] (trié, sans doublon)."""
+    ports = set()
+    for morceau in texte.replace(" ", "").split(","):
+        if not morceau:
+            continue
+        if "-" in morceau:
+            debut, fin = (int(x) for x in morceau.split("-", 1))
+            if debut > fin:
+                debut, fin = fin, debut
+            ports.update(range(debut, fin + 1))
+        else:
+            ports.add(int(morceau))
+    if not ports or min(ports) < 1 or max(ports) > 65535:
+        raise ValueError("les ports doivent être entre 1 et 65535")
+    return sorted(ports)
+
+
+def commande_ping(ip, timeout_s=1):
+    """Arguments de ping adaptés au système (Windows utilise -n et -w en ms)."""
+    if platform.system().lower() == "windows":
+        return ["ping", "-n", "1", "-w", str(timeout_s * 1000), ip]
+    return ["ping", "-c", "1", "-W", str(timeout_s), ip]
+
+
+def _ping(ip):
+    result = subprocess.run(commande_ping(ip), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return ip if result.returncode == 0 else None
+
+
 def ping_sweep(subnet):
-    info(f"Ping sweep sur {subnet}.0/24 ...")
-    actifs = []
-    for i in range(1, 255):
-        ip = f"{subnet}.{i}"
-        result = subprocess.run(
-            ["ping", "-c", "1", "-W", "1", ip],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        if result.returncode == 0:
-            succes(f"Hôte actif : {ip}")
-            actifs.append(ip)
+    subnet = valider_subnet(subnet)
+    info(f"Ping sweep sur {subnet}.0/24 ({THREADS} threads) ...")
+    ips = [f"{subnet}.{i}" for i in range(1, 255)]
+    with ThreadPoolExecutor(max_workers=THREADS) as pool:
+        actifs = [ip for ip in pool.map(_ping, ips) if ip]
+    for ip in actifs:
+        succes(f"Hôte actif : {ip}")
     info(f"{len(actifs)} hôte(s) actif(s) trouvé(s).")
     return actifs
 
@@ -49,6 +94,7 @@ def ping_sweep(subnet):
 # 2. ARP SCAN
 # ─────────────────────────────────────────
 def arp_scan(subnet):
+    subnet = valider_subnet(subnet)
     info(f"ARP scan sur {subnet}.0/24 ...")
     actifs = []
 
@@ -98,21 +144,27 @@ def detecter_service(port):
     except:
         return SERVICES.get(port, "Inconnu")
 
-def port_scan(cible, ports):
-    info(f"Scan de ports sur {cible} ...")
-    ouverts = []
-    for port in ports:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.5)
-            if sock.connect_ex((cible, port)) == 0:
-                service = detecter_service(port)
-                succes(f"Port {port}/tcp OUVERT  →  Service : {service}")
-                ouverts.append((port, service))
-            sock.close()
-        except:
-            pass
-    return ouverts
+def _tester_port(cible, port, timeout=0.5):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            return port if sock.connect_ex((cible, port)) == 0 else None
+    except OSError:
+        return None
+
+
+def port_scan(cible, ports, timeout=0.5):
+    ports = list(ports)
+    info(f"Scan de {len(ports)} port(s) sur {cible} ({THREADS} threads) ...")
+    with ThreadPoolExecutor(max_workers=THREADS) as pool:
+        resultats = pool.map(lambda p: _tester_port(cible, p, timeout), ports)
+        ouverts = sorted(p for p in resultats if p)
+    liste = []
+    for port in ouverts:
+        service = detecter_service(port)
+        succes(f"Port {port}/tcp OUVERT  →  Service : {service}")
+        liste.append((port, service))
+    return liste
 
 
 # ─────────────────────────────────────────
@@ -142,10 +194,7 @@ def deviner_os_ttl(cible):
     TTL ~255 → Cisco/réseau
     """
     try:
-        result = subprocess.run(
-            ["ping", "-c", "1", cible],
-            capture_output=True, text=True
-        )
+        result = subprocess.run(commande_ping(cible), capture_output=True, text=True)
         for ligne in result.stdout.splitlines():
             if "ttl=" in ligne.lower():
                 ttl = int(ligne.lower().split("ttl=")[1].split()[0])
@@ -240,14 +289,18 @@ def subdomain_enum(domaine):
     info(f"Énumération des sous-domaines de {domaine} ...")
     trouves = []
 
-    for sub in SOUS_DOMAINES_COMMUNS:
+    def resoudre(sub):
         cible = f"{sub}.{domaine}"
         try:
-            ip = socket.gethostbyname(cible)
-            succes(f"Trouvé : {cible}  →  {ip}")
-            trouves.append((cible, ip))
-        except socket.gaierror:
-            pass  # Sous-domaine inexistant, on continue
+            return cible, socket.gethostbyname(cible)
+        except (socket.gaierror, UnicodeError):
+            return None  # Sous-domaine inexistant
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        for res in pool.map(resoudre, SOUS_DOMAINES_COMMUNS):
+            if res:
+                succes(f"Trouvé : {res[0]}  →  {res[1]}")
+                trouves.append(res)
 
     if not trouves:
         warn("Aucun sous-domaine trouvé.")
@@ -318,70 +371,109 @@ def menu():
     return input(f"\n{C.GRAS}>> Choix : {C.RESET}").strip()
 
 
-def main():
+TOP_PORTS = [21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 3306, 3389, 5900, 8080, 8443]
+PORTS_COMPLET = TOP_PORTS + [27017, 6379, 5432]
+
+
+def scan_complet(cible, ports, nmap=True):
+    ports_ouverts = port_scan(cible, ports)
+    os_ttl = deviner_os_ttl(cible)
+    os_nmap = os_fingerprint_nmap(cible) if nmap else "ignoré (--no-nmap)"
+    return ports_ouverts, os_ttl, os_nmap
+
+
+def demander_ports():
+    print("  1. Top ports courants\n  2. Ports 1-1024\n  3. Personnalisé (ex: 22,80,8000-8100)")
+    cp = input(">> : ").strip()
+    if cp == "1":
+        return TOP_PORTS
+    if cp == "2":
+        return range(1, 1025)
+    while True:
+        try:
+            return parser_ports(input(">> Ports : "))
+        except ValueError as e:
+            erreur(f"Entrée invalide : {e}")
+
+
+def menu_interactif():
     choix = menu()
-
-    if choix == "1":
-        subnet = input(">> Sous-réseau (ex: 192.168.1) : ").strip()
-        ping_sweep(subnet)
-
-    elif choix == "2":
-        subnet = input(">> Sous-réseau (ex: 192.168.1) : ").strip()
-        arp_scan(subnet)
-
-    elif choix == "3":
-        cible = input(">> IP cible : ").strip()
-        print("  1. Top ports courants\n  2. Ports 1-1024\n  3. Personnalisé")
-        cp = input(">> : ").strip()
-        if cp == "1":
-            ports = [21,22,23,25,53,80,110,139,143,443,445,3306,3389,5900,8080,8443]
-        elif cp == "2":
-            ports = range(1, 1025)
-        else:
-            d = int(input(">> Début : "))
-            f = int(input(">> Fin : "))
-            ports = range(d, f+1)
-
-        ports_ouverts = port_scan(cible, ports)
-        os_ttl, os_nmap = os_fingerprint(cible)
-        afficher_rapport(cible, ports_ouverts, os_ttl, os_nmap)
-
-    elif choix == "4":
-        domaine = input(">> Domaine (ex: example.com) : ").strip()
-        dns_resolution(domaine)
-
-    elif choix == "5":
-        domaine = input(">> Domaine (ex: example.com) : ").strip()
-        subdomain_enum(domaine)
-
-    elif choix == "6":
-        print("\n  Mode : IP ou Domaine ?")
-        print("  1. IP\n  2. Domaine")
-        mode = input(">> : ").strip()
-
-        dns_info = None
-        subdomains = None
-
-        if mode == "2":
-            domaine = input(">> Domaine : ").strip()
-            dns_info = dns_resolution(domaine)
-            subdomains = subdomain_enum(domaine)
-            cible = dns_info.get("IPv4", domaine)
-        else:
+    try:
+        if choix == "1":
+            ping_sweep(input(">> Sous-réseau (ex: 192.168.1) : "))
+        elif choix == "2":
+            arp_scan(input(">> Sous-réseau (ex: 192.168.1) : "))
+        elif choix == "3":
             cible = input(">> IP cible : ").strip()
+            ports = demander_ports()
+            afficher_rapport(cible, *scan_complet(cible, ports))
+        elif choix == "4":
+            dns_resolution(input(">> Domaine (ex: example.com) : ").strip())
+        elif choix == "5":
+            subdomain_enum(input(">> Domaine (ex: example.com) : ").strip())
+        elif choix == "6":
+            print("\n  Mode : IP ou Domaine ?")
+            print("  1. IP\n  2. Domaine")
+            mode = input(">> : ").strip()
+            dns_info = subdomains = None
+            if mode == "2":
+                domaine = input(">> Domaine : ").strip()
+                dns_info = dns_resolution(domaine)
+                subdomains = subdomain_enum(domaine)
+                cible = dns_info.get("IPv4", domaine)
+            else:
+                cible = input(">> IP cible : ").strip()
+            afficher_rapport(cible, *scan_complet(cible, PORTS_COMPLET), dns_info, subdomains)
+        elif choix == "7":
+            print("Bye!")
+        else:
+            erreur("Choix invalide.")
+    except ValueError as e:
+        erreur(str(e))
 
-        # Scan complet
-        ports = [21,22,23,25,53,80,110,139,143,443,445,3306,3389,5900,8080,8443,8443,27017,6379,5432]
-        ports_ouverts = port_scan(cible, ports)
-        os_ttl, os_nmap = os_fingerprint(cible)
-        afficher_rapport(cible, ports_ouverts, os_ttl, os_nmap, dns_info, subdomains)
 
-    elif choix == "7":
-        print("Bye!")
-        sys.exit(0)
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Basic Network Recon Tool — à n'utiliser que sur des réseaux et machines que tu es autorisé à tester.",
+        epilog="Sans argument, le menu interactif s'ouvre.",
+    )
+    sub = parser.add_subparsers(dest="cmd")
+    p = sub.add_parser("sweep", help="ping sweep d'un /24");  p.add_argument("subnet")
+    p = sub.add_parser("arp", help="scan ARP d'un /24");      p.add_argument("subnet")
+    p = sub.add_parser("scan", help="scan de ports + OS + bannières")
+    p.add_argument("cible")
+    p.add_argument("-p", "--ports", default=",".join(map(str, TOP_PORTS)), help="ex: 22,80,8000-8100 (défaut : top ports)")
+    p.add_argument("--no-nmap", action="store_true", help="ne pas lancer nmap -O (pas de sudo)")
+    p = sub.add_parser("dns", help="résolution DNS");          p.add_argument("domaine")
+    p = sub.add_parser("subs", help="énumération de sous-domaines"); p.add_argument("domaine")
+    p = sub.add_parser("full", help="DNS + sous-domaines + scan d'un domaine")
+    p.add_argument("domaine"); p.add_argument("--no-nmap", action="store_true")
+    args = parser.parse_args(argv)
 
-    else:
-        erreur("Choix invalide.")
+    if not args.cmd:
+        menu_interactif()
+        return 0
+    try:
+        if args.cmd == "sweep":
+            ping_sweep(args.subnet)
+        elif args.cmd == "arp":
+            arp_scan(args.subnet)
+        elif args.cmd == "scan":
+            afficher_rapport(args.cible, *scan_complet(args.cible, parser_ports(args.ports), not args.no_nmap))
+        elif args.cmd == "dns":
+            dns_resolution(args.domaine)
+        elif args.cmd == "subs":
+            subdomain_enum(args.domaine)
+        elif args.cmd == "full":
+            dns_info = dns_resolution(args.domaine)
+            subdomains = subdomain_enum(args.domaine)
+            cible = dns_info.get("IPv4", args.domaine)
+            afficher_rapport(cible, *scan_complet(cible, PORTS_COMPLET, not args.no_nmap), dns_info, subdomains)
+    except ValueError as e:
+        erreur(str(e))
+        return 2
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

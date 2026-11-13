@@ -38,8 +38,8 @@ sudo apt install nmap arp-scan -y
 
 ```bash
 # Cloner le dépôt
-git clone https://github.com/TON_USERNAME/network-recon-tool.git
-cd network-recon-tool
+git clone https://github.com/Jimo0x/Basic-Network-Recon-Tool.git
+cd Basic-Network-Recon-Tool
 
 # Donner les permissions d'exécution
 chmod +x recon.py
@@ -50,8 +50,23 @@ chmod +x recon.py
 ## ▶️ Utilisation
 
 ```bash
-python3 recon.py
+python3 recon.py            # menu interactif
 ```
+
+### En ligne de commande
+
+```bash
+python3 recon.py sweep 192.168.1                # ping sweep du /24 (en parallèle)
+python3 recon.py arp 192.168.1.0/24             # scan ARP
+python3 recon.py scan 192.168.1.10 -p 22,80,8000-8100 --no-nmap
+python3 recon.py dns example.com
+python3 recon.py subs example.com
+python3 recon.py full example.com               # DNS + sous-domaines + scan
+```
+
+Les scans (ping sweep, ports, sous-domaines) tournent en parallèle sur 100 threads :
+un ping sweep de /24 passe de plusieurs minutes à quelques secondes.
+Les entrées (sous-réseau, ports) sont validées avant toute commande système.
 
 ### Menu principal
 
@@ -107,7 +122,8 @@ python3 recon.py
 ```
 network-recon-tool/
 │
-├── recon.py          # Script principal
+├── recon.py          # Script principal (bibliothèque standard uniquement)
+├── tests/            # Tests (pytest)
 └── README.md         # Documentation
 ```
 
